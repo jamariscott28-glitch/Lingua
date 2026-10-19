@@ -6,13 +6,18 @@ export type Question = {
   word: string; translation: string; example: string;
 };
 export type Attempt = { questionId: string; timestamp: string; correct: boolean; answer: string };
-export type ReviewItem = { questionId: string; dueAt: string; interval: number; ease: number; status: 'due' | 'learning' };
+export type ReviewSource = 'mistake' | 'practice';
+export type ReviewItem = { questionId: string; dueAt: string; interval: number; ease: number; status: 'due' | 'learning'; source?: ReviewSource };
+export type MistakeItem = {
+  questionId: string; originalQuestion: Question; userAnswer: string; correctAnswer: string;
+  explanation: string; firstMissedAt: string; lastMissedAt: string; nextReviewAt: string; timesMissed: number;
+};
 export type VocabularyItem = { word: string; translation: string; example: string; languageId: string; savedAt: string };
 export type StudySession = { startedAt: string; completedAt: string | null; answered: number; correct: number };
 export type LinguaState = {
   version: number; languageId: string; dailyGoal: number; attempts: Attempt[];
   history: Record<string, number>; streak: number; lastPracticeDay: string | null;
-  reviews: ReviewItem[]; vocabulary: VocabularyItem[]; sessions: StudySession[];
+  reviews: ReviewItem[]; mistakes: MistakeItem[]; vocabulary: VocabularyItem[]; sessions: StudySession[];
   seen: string[];
 };
 
@@ -61,8 +66,107 @@ export const questionBank: Question[] = [
 
 export const createInitialState = (): LinguaState => ({
   version: 1, languageId: 'es', dailyGoal: 10, attempts: [], history: {}, streak: 0, lastPracticeDay: null,
-  reviews: [], vocabulary: [], sessions: [], seen: [],
+  reviews: [], mistakes: [], vocabulary: [], sessions: [], seen: [],
 });
 export const dayKey = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
 export const normalizeAnswer = (value: string) => value.toLocaleLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[¿?¡!.,;:'"“”]/g,'').replace(/\s+/g,' ').trim();
 export const isCorrectAnswer = (answer: string, accepted: string[]) => accepted.some(a => normalizeAnswer(answer) === normalizeAnswer(a));
+
+export const calculatePracticeAccuracy = (attempts: Attempt[]): number | null =>
+  attempts.length ? Math.round(attempts.filter(attempt => attempt.correct).length / attempts.length * 100) : null;
+
+export const isReviewDue = (item: Pick<ReviewItem, 'dueAt'>, now: Date | number = Date.now()): boolean => {
+  const dueAt = Date.parse(item.dueAt);
+  const currentTime = now instanceof Date ? now.getTime() : now;
+  return Number.isFinite(dueAt) && dueAt <= currentTime;
+};
+
+export const scheduleReviewAt = (from: string | Date, intervalDays: number): string => {
+  const timestamp = from instanceof Date ? from.getTime() : Date.parse(from);
+  return new Date(timestamp + Math.max(0, intervalDays) * 24 * 60 * 60 * 1000).toISOString();
+};
+
+export const upsertMistake = (
+  mistakes: MistakeItem[],
+  question: Question,
+  userAnswer: string,
+  missedAt: string,
+  nextReviewAt: string,
+): MistakeItem[] => {
+  const previous = mistakes.find(item => item.questionId === question.id);
+  const originalQuestion = {
+    ...question,
+    accepted: [...question.accepted],
+    choices: question.choices ? [...question.choices] : undefined,
+  };
+  const next: MistakeItem = {
+    questionId: question.id,
+    originalQuestion,
+    userAnswer,
+    correctAnswer: question.accepted[0],
+    explanation: question.explanation,
+    firstMissedAt: previous?.firstMissedAt || missedAt,
+    lastMissedAt: missedAt,
+    nextReviewAt,
+    timesMissed: (previous?.timesMissed || 0) + 1,
+  };
+  return [...mistakes.filter(item => item.questionId !== question.id), next];
+};
+
+export const migrateReviewSources = (reviews: ReviewItem[], attempts: Attempt[]): ReviewItem[] =>
+  reviews.map(review => ({
+    ...review,
+    source: review.source === 'mistake' || review.source === 'practice' ? review.source : (
+      attempts.some(attempt => attempt.questionId === review.questionId && !attempt.correct)
+        ? 'mistake'
+        : 'practice'
+    ),
+  }));
+
+export const migrateLegacyMistakes = (attempts: Attempt[], reviews: ReviewItem[]): MistakeItem[] => {
+  const missedByQuestion = new Map<string, Attempt[]>();
+  for (const attempt of attempts) {
+    if (attempt.correct) continue;
+    const missed = missedByQuestion.get(attempt.questionId) || [];
+    missed.push(attempt);
+    missedByQuestion.set(attempt.questionId, missed);
+  }
+
+  return [...missedByQuestion.entries()].flatMap(([questionId, missed]) => {
+    const question = questionBank.find(item => item.id === questionId);
+    if (!question) return [];
+    const first = missed[0];
+    const latest = missed[missed.length - 1];
+    const scheduledReview = reviews.find(item => item.questionId === questionId);
+    return [{
+      questionId,
+      originalQuestion: {
+        ...question,
+        accepted: [...question.accepted],
+        choices: question.choices ? [...question.choices] : undefined,
+      },
+      userAnswer: latest.answer,
+      correctAnswer: question.accepted[0],
+      explanation: question.explanation,
+      firstMissedAt: first.timestamp,
+      lastMissedAt: latest.timestamp,
+      nextReviewAt: scheduledReview?.dueAt || scheduleReviewAt(latest.timestamp, 1),
+      timesMissed: missed.length,
+    }];
+  });
+};
+
+export const isMistakeItem = (value: unknown): value is MistakeItem => {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<MistakeItem>;
+  const question = item.originalQuestion as Partial<Question> | undefined;
+  return typeof item.questionId === 'string'
+    && typeof item.userAnswer === 'string'
+    && typeof item.correctAnswer === 'string'
+    && typeof item.explanation === 'string'
+    && typeof item.firstMissedAt === 'string'
+    && typeof item.lastMissedAt === 'string'
+    && typeof item.nextReviewAt === 'string'
+    && typeof item.timesMissed === 'number'
+    && Boolean(question && typeof question.prompt === 'string' && Array.isArray(question.accepted));
+};

@@ -132,12 +132,24 @@ button { cursor: pointer; }
 .row-actions {display:flex;gap:7px;align-items:center;}
 .mini-action {background:none;border:0;color:#7a8177;padding:9px;border-radius:10px;min-width:38px;min-height:38px;}
 .mini-action:hover {background:#ece7dc;color:#843e4c;}
+.save-word-button {display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 10px;font-size:11px;font-weight:700;}
+.save-word-button.saved {color:#843e4c;background:#f3e8e5;}
 .review-card {background:#f8f5ec;border:1px solid #e7e1d5;border-radius:20px;padding:20px;margin-bottom:13px;}
 .review-word {font:600 31px var(--app-font-serif);color:#214b37;margin:4px 0;}
 .review-answer {font-size:14px;color:#748074;margin:6px 0 18px;}
 .review-count {font-size:11px;color:#81877d;}
 .review-actions {display:flex;gap:9px;}
 .review-actions button {flex:1;}
+.mistake-list {display:grid;gap:11px;}
+.mistake-entry {background:#f8f5ec;border:1px solid #e7e1d5;border-radius:18px;padding:17px;}
+.mistake-entry .question-meta {margin-bottom:13px;}
+.mistake-prompt {font:600 20px/1.3 var(--app-font-serif);color:#284b37;margin-bottom:13px;}
+.mistake-answer-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;}
+.mistake-answer-grid > div {display:flex;flex-direction:column;gap:5px;background:#f3efe4;border-radius:12px;padding:11px;min-width:0;}
+.mistake-answer-grid small {font-size:10px;color:#81877d;}
+.mistake-answer-grid strong {font-size:12px;color:#31513e;overflow-wrap:anywhere;}
+.mistake-explanation {font-size:12px;line-height:1.55;color:#687267;margin:12px 0;}
+.mistake-date {display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:#843e4c;border-top:1px solid #e8e2d6;padding-top:11px;}
 .chart {height:184px;display:flex;align-items:flex-end;gap:10px;padding:14px 4px 0;}
 .chart-col {flex:1;display:flex;flex-direction:column;align-items:center;gap:9px;height:100%;justify-content:flex-end;}
 .chart-bar {width:min(100%,28px);min-height:4px;background:#9cb39a;border-radius:8px 8px 3px 3px;position:relative;transition:height .4s;}

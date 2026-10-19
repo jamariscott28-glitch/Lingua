@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Route, Switch, useLocation } from 'wouter';
 import { BookOpen, Bookmark, CalendarDays, Check, ChevronLeft, ChevronRight, CircleHelp, Flame, Leaf, Library, ListChecks, RotateCcw, Settings2, Sparkles, Target, TrendingUp, X } from 'lucide-react';
-import { createInitialState, dayKey, isCorrectAnswer, languages, normalizeAnswer, questionBank, type Attempt, type LinguaState, type Question } from './learning';
+import { calculatePracticeAccuracy, createInitialState, dayKey, isCorrectAnswer, isMistakeItem, isReviewDue, languages, migrateLegacyMistakes, migrateReviewSources, normalizeAnswer, questionBank, scheduleReviewAt, upsertMistake, type Attempt, type LinguaState, type MistakeItem, type Question, type ReviewItem } from './learning';
 
 const STORAGE_KEY = 'lingua-learning-v1';
 const navigation = [
@@ -14,6 +14,17 @@ const navigation = [
 const spanishQuestions = questionBank.filter(q => q.languageId === 'es');
 const dateLabel = new Intl.DateTimeFormat('en', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
 const dayName = (date: Date) => new Intl.DateTimeFormat('en', { weekday: 'short' }).format(date);
+const formatReviewDate = (value: string) => {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Date unavailable';
+  return date.toLocaleString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
 
 function readSaved(): { state: LinguaState; malformed: boolean } {
   try {
@@ -27,7 +38,10 @@ function readSaved(): { state: LinguaState; malformed: boolean } {
     if (parsed.vocabulary.some((item: LinguaState['vocabulary'][number]) => !item || typeof item.word !== 'string' || typeof item.translation !== 'string' || typeof item.example !== 'string' || typeof item.languageId !== 'string')) throw new Error('Invalid saved vocabulary');
     if (parsed.sessions.some((item: LinguaState['sessions'][number]) => !item || typeof item.startedAt !== 'string' || typeof item.answered !== 'number' || typeof item.correct !== 'number')) throw new Error('Invalid saved sessions');
     const allowed = languages.some(language => language.id === parsed.languageId);
-    return { state: { ...createInitialState(), ...parsed, languageId: allowed ? parsed.languageId : 'es' }, malformed: false };
+    const reviews = migrateReviewSources(parsed.reviews, parsed.attempts);
+    const persistedMistakes = Array.isArray(parsed.mistakes) ? parsed.mistakes.filter(isMistakeItem) : null;
+    const mistakes = persistedMistakes ?? migrateLegacyMistakes(parsed.attempts, reviews);
+    return { state: { ...createInitialState(), ...parsed, reviews, mistakes, languageId: allowed ? parsed.languageId : 'es' }, malformed: false };
   } catch {
     try { localStorage.removeItem(STORAGE_KEY); } catch { /* storage can be unavailable */ }
     return { state: createInitialState(), malformed: true };
@@ -44,6 +58,7 @@ function App() {
   const [reviewIndex, setReviewIndex] = useState(0);
   const [reviewReveal, setReviewReveal] = useState(false);
   const [vocabReveal, setVocabReveal] = useState<string[]>([]);
+  const [clockNow, setClockNow] = useState(() => Date.now());
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
@@ -51,6 +66,10 @@ function App() {
   }, [state]);
   useEffect(() => {
     if ('serviceWorker' in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
   }, []);
   useEffect(() => {
     if (!toast) return;
@@ -61,10 +80,16 @@ function App() {
   const language = languages.find(item => item.id === state.languageId) || languages[0];
   const availableQuestions = questionBank.filter(q => q.languageId === state.languageId);
   const todaysAttempts = state.attempts.filter(a => dayKey(new Date(a.timestamp)) === dayKey());
-  const accuracy = state.attempts.length ? Math.round(state.attempts.filter(a => a.correct).length / state.attempts.length * 100) : 0;
-  const dueReviewItems = state.reviews.filter(item => item.dueAt <= new Date().toISOString() && item.questionId.startsWith(`${state.languageId}-`));
-  const dueReviewQuestions = dueReviewItems.map(item => availableQuestions.find(q => q.id === item.questionId)).filter((item): item is Question => Boolean(item));
-  const reviewQuestion = dueReviewQuestions[reviewIndex % Math.max(1, dueReviewQuestions.length)];
+  const accuracy = calculatePracticeAccuracy(state.attempts);
+  const relevantReviews = state.reviews.filter(item => item.questionId.startsWith(`${state.languageId}-`));
+  const makeReviewEntries = (items: ReviewItem[]) => items.map(item => ({
+    item,
+    question: availableQuestions.find(question => question.id === item.questionId),
+  })).filter((entry): entry is { item: ReviewItem; question: Question } => Boolean(entry.question));
+  const dueReviewEntries = makeReviewEntries(relevantReviews.filter(item => isReviewDue(item, clockNow)));
+  const upcomingReviewEntries = makeReviewEntries(relevantReviews.filter(item => !isReviewDue(item, clockNow)));
+  const reviewEntry = dueReviewEntries[reviewIndex % Math.max(1, dueReviewEntries.length)];
+  const reviewQuestion = reviewEntry?.question;
   const savedVocabulary = state.vocabulary.filter(item => item.languageId === state.languageId);
   const latestAttempts = [...state.attempts].reverse().slice(0, 8);
   const sessionQuestion = activeSession ? availableQuestions.find(q => q.id === activeSession.ids[activeSession.index]) : undefined;
@@ -72,7 +97,7 @@ function App() {
 
   const showToast = (message: string) => setToast(message);
   const startSession = () => {
-    const due = state.reviews.filter(item => item.dueAt <= new Date().toISOString() && item.questionId.startsWith(`${state.languageId}-`)).map(item => item.questionId);
+    const due = state.reviews.filter(item => isReviewDue(item, clockNow) && item.questionId.startsWith(`${state.languageId}-`)).map(item => item.questionId);
     const unseen = availableQuestions.filter(q => !state.seen.includes(q.id) && !due.includes(q.id)).map(q => q.id);
     const remaining = availableQuestions.filter(q => !due.includes(q.id) && !unseen.includes(q.id)).map(q => q.id);
     const ordered = [...new Set([...due, ...unseen, ...remaining])];
@@ -88,19 +113,40 @@ function App() {
     showToast('Saved to your words.');
   };
   const recordAnswer = (question: Question, answer: string, correct: boolean) => {
-    const attempt: Attempt = { questionId: question.id, timestamp: new Date().toISOString(), correct, answer };
+    const timestamp = new Date().toISOString();
+    const attempt: Attempt = { questionId: question.id, timestamp, correct, answer };
     setState(previous => {
       const today = dayKey();
       const existingReview = previous.reviews.find(item => item.questionId === question.id);
-      const nextReviews = correct
-        ? existingReview
-          ? [...previous.reviews.filter(item => item.questionId !== question.id), { questionId: question.id, dueAt: new Date(Date.now() + Math.max(2, existingReview.interval * 2) * 86400000).toISOString(), interval: Math.max(2, existingReview.interval * 2), ease: Math.min(3, existingReview.ease + .1), status: 'learning' as const }]
-          : previous.reviews
-        : [
+      let nextReviews = previous.reviews;
+      let nextMistakes = previous.mistakes;
+      if (correct && existingReview) {
+        const interval = Math.max(2, existingReview.interval * 2);
+        const dueAt = scheduleReviewAt(timestamp, interval);
+        const source = existingReview.source || (previous.mistakes.some(item => item.questionId === question.id) ? 'mistake' : 'practice');
+        nextReviews = [
           ...previous.reviews.filter(item => item.questionId !== question.id),
-          { questionId: question.id, dueAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), interval: 1, ease: 2.5, status: 'due' as const },
+          { ...existingReview, dueAt, interval, ease: Math.min(3, existingReview.ease + .1), status: 'learning', source },
         ];
-      return { ...previous, attempts: [...previous.attempts, attempt], history: { ...previous.history, [today]: (previous.history[today] || 0) + 1 }, reviews: nextReviews, seen: previous.seen.includes(question.id) ? previous.seen : [...previous.seen, question.id] };
+        if (source === 'mistake') {
+          nextMistakes = previous.mistakes.map(item => item.questionId === question.id ? { ...item, nextReviewAt: dueAt } : item);
+        }
+      } else if (!correct) {
+        const dueAt = scheduleReviewAt(timestamp, 1);
+        nextReviews = [
+          ...previous.reviews.filter(item => item.questionId !== question.id),
+          { questionId: question.id, dueAt, interval: 1, ease: 2.5, status: 'due', source: 'mistake' },
+        ];
+        nextMistakes = upsertMistake(previous.mistakes, question, answer, timestamp, dueAt);
+      }
+      return {
+        ...previous,
+        attempts: [...previous.attempts, attempt],
+        history: { ...previous.history, [today]: (previous.history[today] || 0) + 1 },
+        reviews: nextReviews,
+        mistakes: nextMistakes,
+        seen: previous.seen.includes(question.id) ? previous.seen : [...previous.seen, question.id],
+      };
     });
   };
   const finishSession = () => {
@@ -121,13 +167,25 @@ function App() {
   };
   const advanceSession = () => setActiveSession(previous => previous ? { ...previous, index: previous.index + 1 } : null);
   const rateReview = (remembered: boolean) => {
-    const question = reviewQuestion;
-    if (!question) return;
+    if (!reviewEntry) return;
+    const { item: reviewItem } = reviewEntry;
     setState(previous => {
-      const old = previous.reviews.find(item => item.questionId === question.id);
-      const interval = remembered ? Math.max(2, (old?.interval || 1) * 2) : 1;
-      const dueAt = new Date(Date.now() + interval * 86400000).toISOString();
-      return { ...previous, reviews: [...previous.reviews.filter(item => item.questionId !== question.id), { questionId: question.id, dueAt, interval, ease: remembered ? Math.min(3, (old?.ease || 2.5) + .1) : Math.max(1.3, (old?.ease || 2.5) - .2), status: remembered ? 'learning' as const : 'due' as const }] };
+      const interval = remembered ? Math.max(2, reviewItem.interval * 2) : 1;
+      const dueAt = scheduleReviewAt(new Date(), interval);
+      const nextReview: ReviewItem = {
+        ...reviewItem,
+        dueAt,
+        interval,
+        ease: remembered ? Math.min(3, reviewItem.ease + .1) : Math.max(1.3, reviewItem.ease - .2),
+        status: remembered ? 'learning' : 'due',
+      };
+      return {
+        ...previous,
+        reviews: [...previous.reviews.filter(item => item.questionId !== reviewItem.questionId), nextReview],
+        mistakes: reviewItem.source === 'mistake'
+          ? previous.mistakes.map(item => item.questionId === reviewItem.questionId ? { ...item, nextReviewAt: dueAt } : item)
+          : previous.mistakes,
+      };
     });
     setReviewReveal(false);
     setReviewIndex(0);
@@ -159,10 +217,10 @@ function App() {
     {storageNotice && <div className="page"><div className="notice" role="status">{storageNotice}<button className="mini-action" aria-label="Dismiss notice" onClick={() => setStorageNotice('')}><X size={15}/></button></div></div>}
     <Switch>
       <Route path="/learn">
-        <LearnPage language={language} session={activeSession} question={sessionQuestion} onStart={startSession} onExit={abandonSession} onAnswer={recordAnswer} onFinish={finishSession} onAdvance={advanceSession} onSave={saveVocab} />
+        <LearnPage language={language} session={activeSession} question={sessionQuestion} savedWords={savedVocabulary.map(item => item.word)} onStart={startSession} onExit={abandonSession} onAnswer={recordAnswer} onFinish={finishSession} onAdvance={advanceSession} onSave={saveVocab} />
       </Route>
       <Route path="/review">
-        <ReviewPage due={dueReviewQuestions} upcoming={state.reviews.filter(item => item.dueAt > new Date().toISOString() && item.questionId.startsWith(`${state.languageId}-`)).map(item => availableQuestions.find(q => q.id === item.questionId)).filter((item): item is Question => Boolean(item))} dueCount={dueReviewItems.length} question={reviewQuestion} reveal={reviewReveal} setReveal={setReviewReveal} vocabulary={savedVocabulary} vocabReveal={vocabReveal} setVocabReveal={setVocabReveal} onRemove={removeVocab} onRate={rateReview} />
+        <ReviewPage due={dueReviewEntries} upcoming={upcomingReviewEntries} mistakes={state.mistakes.filter(item => item.originalQuestion.languageId === state.languageId)} question={reviewQuestion} reveal={reviewReveal} setReveal={setReviewReveal} vocabulary={savedVocabulary} vocabReveal={vocabReveal} setVocabReveal={setVocabReveal} onRemove={removeVocab} onRate={rateReview} />
       </Route>
       <Route path="/progress">
         <ProgressPage state={state} accuracy={accuracy} todaysAttempts={todaysAttempts.length} />
@@ -171,10 +229,10 @@ function App() {
         <LanguagesPage selected={state.languageId} onSelect={switchLanguage} />
       </Route>
       <Route path="/">
-        <HomePage state={state} language={language} attemptsToday={todaysAttempts.length} dailyProgress={dailyProgress} dueCount={dueReviewItems.length} onGoal={setGoal} onStart={startSession} />
+        <HomePage state={state} language={language} attemptsToday={todaysAttempts.length} dailyProgress={dailyProgress} accuracy={accuracy} dueCount={dueReviewEntries.length} onGoal={setGoal} onStart={startSession} />
       </Route>
       <Route>
-        <HomePage state={state} language={language} attemptsToday={todaysAttempts.length} dailyProgress={dailyProgress} dueCount={dueReviewItems.length} onGoal={setGoal} onStart={startSession} />
+        <HomePage state={state} language={language} attemptsToday={todaysAttempts.length} dailyProgress={dailyProgress} accuracy={accuracy} dueCount={dueReviewEntries.length} onGoal={setGoal} onStart={startSession} />
       </Route>
     </Switch>
     <nav className="bottom-nav" aria-label="Main navigation">
@@ -184,7 +242,7 @@ function App() {
   </div>;
 }
 
-function HomePage({ state, language, attemptsToday, dailyProgress, dueCount, onGoal, onStart }: { state: LinguaState; language: typeof languages[number]; attemptsToday: number; dailyProgress: number; dueCount: number; onGoal: (goal: number) => void; onStart: () => void }) {
+function HomePage({ state, language, attemptsToday, dailyProgress, accuracy, dueCount, onGoal, onStart }: { state: LinguaState; language: typeof languages[number]; attemptsToday: number; dailyProgress: number; accuracy: number | null; dueCount: number; onGoal: (goal: number) => void; onStart: () => void }) {
   const goalMet = attemptsToday >= state.dailyGoal;
   return <main className="page">
     <div className="eyebrow">{dateLabel}</div>
@@ -198,7 +256,7 @@ function HomePage({ state, language, attemptsToday, dailyProgress, dueCount, onG
     <section className="metrics">
       <div className="metric"><span className="metric-label"><Target size={15}/> Daily goal</span><strong>{attemptsToday}<small> / {state.dailyGoal}</small></strong><small>answers today</small></div>
       <div className="metric"><span className="metric-label"><Flame size={15}/> Current streak</span><strong>{state.streak}<small> days</small></strong><small>one completed session a day</small></div>
-      <div className="metric"><span className="metric-label"><TrendingUp size={15}/> Practice accuracy</span><strong>{state.attempts.length ? `${Math.round(state.attempts.filter(a => a.correct).length / state.attempts.length * 100)}%` : '—'}</strong><small>across all answers</small></div>
+      <div className="metric"><span className="metric-label"><TrendingUp size={15}/> Practice accuracy</span><strong>{accuracy === null ? '—' : `${accuracy}%`}</strong><small>across all answers</small></div>
       <div className="metric"><span className="metric-label"><RotateCcw size={15}/> Ready to revisit</span><strong>{dueCount}</strong><small>in your notebook</small></div>
     </section>
     <div className="section-head"><h2>Today’s intention</h2><span className="eyebrow">AIM FOR WHAT FITS</span></div>
@@ -217,7 +275,7 @@ function HomePage({ state, language, attemptsToday, dailyProgress, dueCount, onG
   </main>;
 }
 
-function LearnPage({ language, session, question, onStart, onExit, onAnswer, onFinish, onAdvance, onSave }: { language: typeof languages[number]; session: { ids: string[]; index: number; startedAt: string } | null; question: Question | undefined; onStart: () => void; onExit: () => void; onAnswer: (question: Question, answer: string, correct: boolean) => void; onFinish: () => void; onAdvance: () => void; onSave: (question: Question) => void }) {
+function LearnPage({ language, session, question, savedWords, onStart, onExit, onAnswer, onFinish, onAdvance, onSave }: { language: typeof languages[number]; session: { ids: string[]; index: number; startedAt: string } | null; question: Question | undefined; savedWords: string[]; onStart: () => void; onExit: () => void; onAnswer: (question: Question, answer: string, correct: boolean) => void; onFinish: () => void; onAdvance: () => void; onSave: (question: Question) => void }) {
   const [selected, setSelected] = useState('');
   const [submitted, setSubmitted] = useState(false);
   const [answer, setAnswer] = useState('');
@@ -237,10 +295,11 @@ function LearnPage({ language, session, question, onStart, onExit, onAnswer, onF
   if (language.availability !== 'ready') return <main className="lesson-wrap"><div className="panel empty-state"><div className="empty-icon"><BookOpen size={22}/></div><h3>Lessons are on their way</h3><p>{language.name} is in your language shelf, ready for a future course. For now, choose Spanish to practise.</p><Link className="btn btn-forest" href="/languages">Explore languages</Link></div></main>;
   if (!session) return <main className="lesson-wrap"><div className="eyebrow">YOUR SPANISH PRACTICE</div><h1 className="page-title">A few good questions.</h1><p className="subtle" style={{maxWidth:440}}>Practice with a gentle mix of new phrases and anything you found tricky before. No timer, no score pressure.</p><section className="panel" style={{marginTop:25}}><div style={{display:'flex',alignItems:'center',gap:14}}><div className="empty-icon" style={{margin:0}}><Sparkles size={21}/></div><div><strong style={{color:'#31513e'}}>A focused little session</strong><div className="subtle" style={{fontSize:12,marginTop:4}}>Up to 5 questions · about 3 minutes</div></div></div><button className="btn btn-forest" style={{marginTop:23,width:'100%'}} onClick={onStart}>Begin practice<ChevronRight size={16}/></button></section><div className="notice" style={{marginTop:18}}>Lessons work offline once this app has been opened on your device.</div></main>;
   if (!question) return <main className="lesson-wrap"><section className="complete-card"><Check size={28}/><h2>That’s a lovely start.</h2><p>You made time to practise. Your answers are saved on this device.</p><button className="btn btn-primary" onClick={onFinish}>Finish session</button></section></main>;
+  const saved = savedWords.includes(question.word);
   return <main className="lesson-wrap">
     <div className="lesson-head"><button className="icon-button" aria-label="Leave lesson" onClick={onExit}><ChevronLeft size={20}/></button><div className="lesson-progress"><div className="progress-top"><span>Spanish practice</span><strong>{session.index + 1} of {session.ids.length}</strong></div><div className="track" style={{margin:'8px 0 0'}}><span style={{width:`${(session.index / session.ids.length) * 100}%`}}/></div></div><span className="eyebrow">{session.index + 1}/{session.ids.length}</span></div>
     <div className="question-card">
-      <div className="question-meta"><span className="topic-pill">{question.topic}</span><button className="mini-action" aria-label="Save vocabulary item" onClick={() => onSave(question)}><Bookmark size={17}/></button></div>
+      <div className="question-meta"><span className="topic-pill">{question.topic}</span><button className={`mini-action save-word-button ${saved ? 'saved' : ''}`} aria-label={saved ? `Saved ${question.word}` : `Save ${question.word} to vocabulary`} aria-pressed={saved} onClick={() => onSave(question)}><Bookmark size={16} fill={saved ? 'currentColor' : 'none'}/><span>{saved ? 'Saved' : 'Save word'}</span></button></div>
       <h1 className="question-prompt">{question.prompt}</h1><p className="question-instruction">{question.choices ? 'Choose the best answer.' : 'Write your answer below.'}</p>
       {question.choices ? <div className="answer-list">{question.choices.map((choice,index) => {
         const isSelected = selected === choice;
@@ -248,23 +307,31 @@ function LearnPage({ language, session, question, onStart, onExit, onAnswer, onF
         const wrongOption = submitted && isSelected && !feedbackCorrect;
         return <button key={choice} disabled={submitted} className={`answer-option ${isSelected ? 'selected' : ''} ${correctOption ? 'correct' : ''} ${wrongOption ? 'wrong' : ''}`} onClick={() => setSelected(choice)}><span className="choice-letter">{String.fromCharCode(65+index)}</span>{choice}{correctOption && submitted && <Check size={17} style={{marginLeft:'auto'}}/>}</button>;
       })}</div> : <input aria-label="Your answer" className="text-answer" value={answer} disabled={submitted} onChange={event => setAnswer(event.target.value)} onKeyDown={event => { if(event.key === 'Enter') submit(); }} placeholder="Type your answer…" />}
-      {submitted && <div className={`feedback ${feedbackCorrect ? 'good' : 'bad'}`} role="status"><strong>{feedbackCorrect ? 'That’s right.' : 'Not quite — keep it with you.'}</strong>{feedbackText}{!feedbackCorrect && <div style={{marginTop:6}}><b>Answer:</b> {question.accepted[0]}</div>}</div>}
+      {submitted && <div className={`feedback ${feedbackCorrect ? 'good' : 'bad'}`} role="status"><strong>{feedbackCorrect ? 'That’s right.' : 'Not quite — keep it with you.'}</strong>{feedbackText}{!feedbackCorrect && <div style={{marginTop:6}}><b>Answer:</b> {question.accepted.join(' / ')}</div>}</div>}
       <div className="lesson-controls">{!submitted ? <button className="btn btn-forest" onClick={submit} disabled={!(question.choices ? selected : answer.trim())}>Check answer<Check size={16}/></button> : <button className="btn btn-forest" onClick={() => session.index + 1 >= session.ids.length ? onFinish() : onAdvance()}>Continue<ChevronRight size={16}/></button>}</div>
     </div>
   </main>;
 }
 
-function ReviewPage({ due, upcoming, dueCount, question, reveal, setReveal, onRate, vocabulary, vocabReveal, setVocabReveal, onRemove }: { due: Question[]; upcoming: Question[]; dueCount: number; question?: Question; reveal: boolean; setReveal: (value: boolean) => void; onRate: (remembered: boolean) => void; vocabulary: LinguaState['vocabulary']; vocabReveal: string[]; setVocabReveal: (words: string[]) => void; onRemove: (word: string) => void }) {
+function ReviewPage({ due, upcoming, mistakes, question, reveal, setReveal, onRate, vocabulary, vocabReveal, setVocabReveal, onRemove }: { due: { item: ReviewItem; question: Question }[]; upcoming: { item: ReviewItem; question: Question }[]; mistakes: MistakeItem[]; question?: Question; reveal: boolean; setReveal: (value: boolean) => void; onRate: (remembered: boolean) => void; vocabulary: LinguaState['vocabulary']; vocabReveal: string[]; setVocabReveal: (words: string[]) => void; onRemove: (word: string) => void }) {
   return <main className="page">
     <div className="eyebrow">A FRIENDLY PLACE TO RETURN</div><h1 className="page-title">Your notebook.</h1><p className="subtle">The phrases that need another moment, and the words you chose to keep.</p>
-    <div className="section-head"><h2>Ready to revisit</h2><span className="review-count">{dueCount} due</span></div>
+    <div className="section-head"><h2>Ready to revisit</h2><span className="review-count">{due.length} due</span></div>
     {question ? <section className="review-card">
-      <div className="question-meta"><span className="topic-pill">{question.topic}</span><span className="review-count">A gentle second look</span></div>
+      <div className="question-meta"><span className="topic-pill">{question.topic}</span><span className="review-count">{due.find(entry => entry.question.id === question.id)?.item.source === 'mistake' ? 'Mistake review' : 'Scheduled practice'}</span></div>
       <div className="review-word">{question.prompt.replace(/^Translate:\s*/,'')}</div>
       {reveal ? <><div className="review-answer">{question.accepted[0]}</div><div className="notice">{question.explanation}</div><div className="review-actions"><button className="btn btn-outline btn-small" onClick={() => onRate(false)}>Again tomorrow</button><button className="btn btn-forest btn-small" onClick={() => onRate(true)}>I remembered it<Check size={14}/></button></div></> : <button className="btn btn-forest btn-small" onClick={() => setReveal(true)}>Show answer<ChevronRight size={14}/></button>}
       <div className="review-count" style={{marginTop:12}}>{due.length} item{due.length === 1 ? '' : 's'} in today’s queue</div>
     </section> : <section className="panel empty-state"><div className="empty-icon"><Check size={21}/></div><h3>All clear for today</h3><p>Your review queue is quiet. Missed questions will return here when they’re ready.</p><Link className="btn btn-quiet btn-small" href="/learn">Start a lesson</Link></section>}
-    {upcoming.length > 0 && <><div className="section-head"><h2>On the horizon</h2><span className="review-count">{upcoming.length} scheduled</span></div><section className="panel">{upcoming.map(item => <div className="item-row" key={item.id}><div><div className="word-main" style={{fontSize:16}}>{item.accepted[0]}</div><div className="word-sub">{item.topic} · returns tomorrow or later</div></div><RotateCcw size={15} color="#899286"/></div>)}</section></>}
+    <div className="section-head"><h2>Mistake notebook</h2><span className="review-count">{mistakes.length} saved mistake{mistakes.length === 1 ? '' : 's'}</span></div>
+    {mistakes.length ? <section className="mistake-list">{mistakes.map(mistake => <article className="mistake-entry" key={mistake.questionId}>
+      <div className="question-meta"><span className="topic-pill">{mistake.originalQuestion.topic}</span><span className="review-count">{mistake.timesMissed > 1 ? `Missed ${mistake.timesMissed} times` : 'Missed once'}</span></div>
+      <div className="mistake-prompt">{mistake.originalQuestion.prompt}</div>
+      <div className="mistake-answer-grid"><div><small>Your answer</small><strong>{mistake.userAnswer}</strong></div><div><small>Correct answer</small><strong>{mistake.correctAnswer}</strong></div></div>
+      <p className="mistake-explanation">{mistake.explanation}</p>
+      <div className="mistake-date"><RotateCcw size={14}/> Next review: {formatReviewDate(mistake.nextReviewAt)}</div>
+    </article>)}</section> : <section className="panel empty-state"><div className="empty-icon"><Check size={20}/></div><h3>No mistakes saved yet</h3><p>Answers you miss will appear here with the correction and their next review date.</p></section>}
+    {upcoming.length > 0 && <><div className="section-head"><h2>On the horizon</h2><span className="review-count">{upcoming.length} scheduled</span></div><section className="panel">{upcoming.map(({item, question: scheduledQuestion}) => <div className="item-row" key={item.questionId}><div><div className="word-main" style={{fontSize:16}}>{scheduledQuestion.prompt.replace(/^Translate:\s*/,'')}</div><div className="word-sub">{item.source === 'mistake' ? 'Mistake review' : 'Scheduled practice'} · {formatReviewDate(item.dueAt)}</div></div><RotateCcw size={15} color="#899286"/></div>)}</section></>}
     <div className="section-head"><h2>Saved vocabulary</h2><span className="review-count">{vocabulary.length} saved</span></div>
     <section className="panel">
       {vocabulary.length ? vocabulary.map(item => {
@@ -276,14 +343,14 @@ function ReviewPage({ due, upcoming, dueCount, question, reveal, setReveal, onRa
   </main>;
 }
 
-function ProgressPage({ state, accuracy, todaysAttempts }: { state: LinguaState; accuracy: number; todaysAttempts: number }) {
+function ProgressPage({ state, accuracy, todaysAttempts }: { state: LinguaState; accuracy: number | null; todaysAttempts: number }) {
   const days = useMemo(() => Array.from({ length: 7 }, (_, index) => { const date = new Date(); date.setDate(date.getDate() - (6 - index)); const key = dayKey(date); return { key, label: dayName(date), value: state.history[key] || 0, today: index === 6 }; }), [state.history]);
   const totalAnswers = state.attempts.length;
   return <main className="page">
     <div className="eyebrow">A RECORD OF YOUR PRACTICE</div><h1 className="page-title">Look how far you’ve come.</h1><p className="subtle">Small, steady effort adds up. These numbers are a mirror of your practice, not a language-level assessment.</p>
     <section className="stat-grid" style={{marginTop:24}}>
       <div className="stat-box"><span>Questions answered</span><strong>{totalAnswers}</strong></div>
-      <div className="stat-box"><span>Practice accuracy</span><strong>{totalAnswers ? `${accuracy}%` : '—'}</strong></div>
+      <div className="stat-box"><span>Practice accuracy</span><strong>{accuracy === null ? '—' : `${accuracy}%`}</strong></div>
       <div className="stat-box"><span>Study sessions</span><strong>{state.sessions.length}</strong></div>
       <div className="stat-box"><span>Current streak</span><strong>{state.streak} days</strong></div>
     </section>
