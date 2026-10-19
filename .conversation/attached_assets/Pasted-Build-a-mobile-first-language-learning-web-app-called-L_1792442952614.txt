@@ -1,0 +1,33 @@
+Build a mobile-first language-learning web app called Lingua, designed primarily for use on an iPhone.
+
+Purpose: This is my personal language-learning app initially, with the possibility of a public release later.
+
+Design
+
+* Premium, clean, minimalist interface.
+* Forest green, burgundy, cream and white colour palette.
+* Easy to use on a phone, with large buttons and clear navigation.
+* Include a dashboard and bottom navigation.
+
+Core features
+
+1. Home: Daily learning goal, current streak, progress and a button to start learning.
+2. Learn: Interactive lessons with multiple-choice questions, translation, grammar and free-text answers.
+3. Review: A mistake notebook that saves incorrect answers for future revision, plus saved vocabulary.
+4. Progress: Track questions answered, accuracy, study sessions and progress over time.
+5. Languages: Start with Spanish, European Portuguese and French, but make it easy to add more languages later.
+6. Adaptive learning: Prioritise mistakes and weak topics. Avoid repeating questions unnecessarily. Use spaced repetition for revision.
+7. Honest tracking: Clearly distinguish practice accuracy from actual CEFR proficiency. Never claim to measure speaking ability unless speaking has genuinely been assessed.
+8. Persistence: Save learning data locally so it remains available after refreshing or reopening the website.
+9. Mobile installation: Make the website a Progressive Web App (PWA) where practical, so I can add it to my iPhone Home Screen.
+
+Important requirements
+
+* Build a working application, not just a visual mock-up.
+* Include a useful starter question bank for Spanish.
+* Make all navigation and buttons functional.
+* Do not pretend AI tutoring, speech recognition or cloud synchronisation exists unless implemented.
+* Keep the code organised so the app can be expanded later.
+* Prioritise reliability and actual learning value over unnecessary features.
+
+Start by building the functional MVP. Tell me how to preview and test it on my iPhone.

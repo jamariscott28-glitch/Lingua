@@ -1,0 +1,1 @@
+- [Lingua product intent](lingua-product-intent.md) — Lingua begins as a personal learning app; public release may come later.

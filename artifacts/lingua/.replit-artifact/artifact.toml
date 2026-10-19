@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Lingua"
+description = "A mobile-first personal language-learning app with interactive Spanish lessons, saved vocabulary, mistake review, spaced repetition, and honest local progress tracking."
+version = "1.0.0"
+id = "artifacts/lingua"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21587
+
+[services.development]
+run = "pnpm --filter @workspace/lingua run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/lingua", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/lingua/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21587"
+BASE_PATH = "/"

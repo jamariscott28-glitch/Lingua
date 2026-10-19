@@ -1,0 +1,13 @@
+{
+  "name": "Lingua — daily language practice",
+  "short_name": "Lingua",
+  "description": "A calm, personal place to build a language practice habit.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f0e5",
+  "theme_color": "#214b37",
+  "icons": [
+    { "src": "/lingua-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
