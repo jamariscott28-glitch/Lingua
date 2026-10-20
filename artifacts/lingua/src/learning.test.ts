@@ -2,13 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   calculatePracticeAccuracy,
+  contentRegistry,
   isReviewDue,
+  languages,
   migrateLegacyMistakes,
   migrateReviewSources,
   questionBank,
   scheduleReviewAt,
   upsertMistake,
+  validateContentRegistry,
   type Attempt,
+  type ContentRegistry,
   type ReviewItem,
 } from './learning.ts';
 
@@ -70,4 +74,59 @@ test('repeated misses update the same notebook record and retain the first miss 
   assert.equal(second[0].lastMissedAt, secondMissedAt);
   assert.equal(second[0].userAnswer, 'Buenas tardes');
   assert.equal(second[0].timesMissed, 2);
+});
+
+test('content registry maps supported languages while keeping only Spanish lessons available', () => {
+  assert.deepEqual(validateContentRegistry(), []);
+  assert.deepEqual(Object.keys(contentRegistry).sort(), languages.map(language => language.id).sort());
+  assert.equal(contentRegistry.es.language.availability, 'ready');
+  assert.deepEqual(contentRegistry.es.questions, questionBank);
+  assert.equal(contentRegistry.es.questions.length, 30);
+  assert.equal(contentRegistry.pt.language.locale, 'pt-PT');
+  assert.equal(contentRegistry.pt.language.availability, 'coming');
+  assert.deepEqual(contentRegistry.pt.questions, []);
+  assert.equal(contentRegistry.fr.language.locale, 'fr-FR');
+  assert.equal(contentRegistry.fr.language.availability, 'coming');
+  assert.deepEqual(contentRegistry.fr.questions, []);
+});
+
+test('content registry validation rejects unsupported and missing language IDs', () => {
+  const missingFrench = { ...contentRegistry };
+  delete missingFrench.fr;
+  assert.ok(validateContentRegistry(missingFrench).some(error => error.includes('Missing content registry entry for supported language "fr"')));
+
+  const withUnsupportedLanguage = {
+    ...contentRegistry,
+    de: contentRegistry.es,
+  };
+  assert.ok(validateContentRegistry(withUnsupportedLanguage).some(error => error.includes('Unsupported language ID "de"')));
+
+  const unsupportedQuestion = {
+    ...contentRegistry,
+    es: {
+      ...contentRegistry.es,
+      questions: [{ ...question, languageId: 'de' }, ...contentRegistry.es.questions.slice(1)],
+    },
+  } satisfies ContentRegistry;
+  assert.ok(validateContentRegistry(unsupportedQuestion).some(error => error.includes('Question "es-01" uses unsupported language ID "de"')));
+});
+
+test('content registry validation rejects mismatched banks and duplicate question IDs', () => {
+  const mismatchedBank = {
+    ...contentRegistry,
+    pt: {
+      ...contentRegistry.pt,
+      questions: [question],
+    },
+  } satisfies ContentRegistry;
+  assert.ok(validateContentRegistry(mismatchedBank).some(error => error.includes('belongs to "es" but is listed under "pt"')));
+
+  const duplicateQuestion = {
+    ...contentRegistry,
+    es: {
+      ...contentRegistry.es,
+      questions: [...contentRegistry.es.questions, question],
+    },
+  } satisfies ContentRegistry;
+  assert.ok(validateContentRegistry(duplicateQuestion).some(error => error.includes('Duplicate question ID "es-01"')));
 });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Route, Switch, useLocation } from 'wouter';
 import { BookOpen, Bookmark, CalendarDays, Check, ChevronLeft, ChevronRight, CircleHelp, Flame, Leaf, Library, ListChecks, RotateCcw, Settings2, Sparkles, Target, TrendingUp, X } from 'lucide-react';
-import { calculatePracticeAccuracy, createInitialState, dayKey, isCorrectAnswer, isMistakeItem, isReviewDue, languages, migrateLegacyMistakes, migrateReviewSources, normalizeAnswer, questionBank, scheduleReviewAt, upsertMistake, type Attempt, type LinguaState, type MistakeItem, type Question, type ReviewItem } from './learning';
+import { calculatePracticeAccuracy, contentRegistry, createInitialState, dayKey, isCorrectAnswer, isMistakeItem, isReviewDue, languages, migrateLegacyMistakes, migrateReviewSources, normalizeAnswer, questionBank, scheduleReviewAt, upsertMistake, type Attempt, type LinguaState, type MistakeItem, type Question, type ReviewItem } from './learning';
 
 const STORAGE_KEY = 'lingua-learning-v1';
 const navigation = [
@@ -77,8 +77,9 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const language = languages.find(item => item.id === state.languageId) || languages[0];
-  const availableQuestions = questionBank.filter(q => q.languageId === state.languageId);
+  const languageContent = contentRegistry[state.languageId];
+  const language = languageContent?.language || languages[0];
+  const availableQuestions = languageContent?.questions || [];
   const todaysAttempts = state.attempts.filter(a => dayKey(new Date(a.timestamp)) === dayKey());
   const accuracy = calculatePracticeAccuracy(state.attempts);
   const relevantReviews = state.reviews.filter(item => item.questionId.startsWith(`${state.languageId}-`));

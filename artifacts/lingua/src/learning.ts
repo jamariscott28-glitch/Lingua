@@ -1,10 +1,15 @@
 export type Language = { id: string; name: string; locale: string; availability: 'ready' | 'coming' };
+export type LearningSkill = 'reading' | 'writing' | 'listening' | 'speaking';
+export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 export type Question = {
   id: string; languageId: string; topic: string;
   format: 'multiple-choice' | 'translation' | 'grammar' | 'free-text';
   prompt: string; choices?: string[]; accepted: string[]; explanation: string;
   word: string; translation: string; example: string;
+  skill?: LearningSkill; cefrLevel?: CefrLevel;
 };
+export type LanguageContentBank = { language: Language; questions: readonly Question[] };
+export type ContentRegistry = Record<string, LanguageContentBank>;
 export type Attempt = { questionId: string; timestamp: string; correct: boolean; answer: string };
 export type ReviewSource = 'mistake' | 'practice';
 export type ReviewItem = { questionId: string; dueAt: string; interval: number; ease: number; status: 'due' | 'learning'; source?: ReviewSource };
@@ -63,6 +68,63 @@ export const questionBank: Question[] = [
   q('es-29','Everyday nouns','translation','Translate: “I need a ticket.”',['Necesito un billete','Necesito un boleto'],'Billete is common in Spain; boleto is used in much of Latin America.',undefined,'un billete','a ticket','Necesito un billete.'),
   q('es-30','Simple phrases','multiple-choice','Which means “I don’t know”?',['No lo sé'],'No lo sé is the usual phrase; lo refers to the thing you do not know.',['No puedo','No lo sé','No entiendo','No tengo'],'No lo sé','I do not know','No lo sé, lo siento.'),
 ];
+
+export const contentRegistry: ContentRegistry = Object.fromEntries(
+  languages.map(language => [
+    language.id,
+    {
+      language,
+      questions: questionBank.filter(question => question.languageId === language.id),
+    },
+  ]),
+);
+
+export const validateContentRegistry = (registry: Readonly<ContentRegistry> = contentRegistry): string[] => {
+  const errors: string[] = [];
+  const supportedLanguageIds = new Set(languages.map(language => language.id));
+  const questionIds = new Set<string>();
+
+  for (const language of languages) {
+    if (!Object.hasOwn(registry, language.id)) {
+      errors.push(`Missing content registry entry for supported language "${language.id}".`);
+    }
+  }
+
+  for (const [languageId, bank] of Object.entries(registry)) {
+    if (!supportedLanguageIds.has(languageId)) {
+      errors.push(`Unsupported language ID "${languageId}" in content registry.`);
+    }
+    if (!bank || typeof bank !== 'object') {
+      errors.push(`Content registry entry "${languageId}" is invalid.`);
+      continue;
+    }
+    if (!supportedLanguageIds.has(bank.language.id)) {
+      errors.push(`Unsupported language ID "${bank.language.id}" in registry metadata.`);
+    } else if (bank.language.id !== languageId) {
+      errors.push(`Registry key "${languageId}" does not match metadata ID "${bank.language.id}".`);
+    }
+
+    for (const question of bank.questions) {
+      if (!supportedLanguageIds.has(question.languageId)) {
+        errors.push(`Question "${question.id}" uses unsupported language ID "${question.languageId}".`);
+      } else if (question.languageId !== languageId) {
+        errors.push(`Question "${question.id}" belongs to "${question.languageId}" but is listed under "${languageId}".`);
+      }
+      if (questionIds.has(question.id)) {
+        errors.push(`Duplicate question ID "${question.id}" in content registry.`);
+      } else {
+        questionIds.add(question.id);
+      }
+    }
+  }
+
+  return errors;
+};
+
+const contentRegistryErrors = validateContentRegistry();
+if (contentRegistryErrors.length) {
+  throw new Error(`Invalid language content registry:\n${contentRegistryErrors.join('\n')}`);
+}
 
 export const createInitialState = (): LinguaState => ({
   version: 1, languageId: 'es', dailyGoal: 10, attempts: [], history: {}, streak: 0, lastPracticeDay: null,
